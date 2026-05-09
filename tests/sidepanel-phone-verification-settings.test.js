@@ -90,6 +90,7 @@ test('sidepanel html exposes phone verification toggle and multi-provider SMS ro
   assert.match(html, /\.\.\/phone-sms\/providers\/registry\.js/);
   assert.match(html, /<option value="hero-sms">HeroSMS<\/option>/);
   assert.match(html, /<option value="5sim">5sim<\/option>/);
+  assert.match(html, /<option value="smspool">SMSPool<\/option>/);
   assert.match(html, /id="row-hero-sms-country"/);
   assert.match(html, /id="row-hero-sms-country-fallback"/);
   assert.match(html, /id="row-hero-sms-acquire-priority"/);
@@ -136,6 +137,8 @@ test('sidepanel html exposes phone verification toggle and multi-provider SMS ro
   assert.match(html, /id="row-five-sim-product"/);
   assert.match(html, /id="input-five-sim-product"/);
   assert.match(html, /<option value="nexsms">/);
+  assert.match(html, /HeroSMS \/ 5sim \/ SMSPool \/ NexSMS \(4\/4\)/);
+  assert.match(html, /\.\.\/phone-sms\/providers\/smspool\.js/);
   assert.match(html, /id="row-nex-sms-api-key"/);
   assert.match(html, /id="input-nex-sms-api-key"/);
   assert.match(html, /id="row-nex-sms-country"/);
@@ -481,13 +484,14 @@ const btnTogglePhoneVerificationSection = {
   title: '',
   setAttribute: () => {},
 };
-  const DEFAULT_PHONE_SMS_PROVIDER_ORDER = ['hero-sms', '5sim', 'nexsms'];
+  const DEFAULT_PHONE_SMS_PROVIDER_ORDER = ['hero-sms', '5sim', 'smspool', 'nexsms'];
+  const PHONE_SMS_PROVIDER_ORDER_MAX = DEFAULT_PHONE_SMS_PROVIDER_ORDER.length;
   const phoneSmsProviderOrderSelection = [];
   function normalizePhoneSmsProviderOrderValue(value = [], fallbackOrder = DEFAULT_PHONE_SMS_PROVIDER_ORDER) {
     const source = Array.isArray(value) ? value : [];
     const normalized = [...source];
     if (normalized.length) {
-      return normalized.slice(0, 3);
+      return normalized.slice(0, PHONE_SMS_PROVIDER_ORDER_MAX);
     }
     if (!Array.isArray(fallbackOrder) || !fallbackOrder.length) {
       return [];
@@ -498,7 +502,7 @@ const btnTogglePhoneVerificationSection = {
         fallbackNormalized.push(provider);
       }
     }
-    return fallbackNormalized.slice(0, 3);
+    return fallbackNormalized.slice(0, PHONE_SMS_PROVIDER_ORDER_MAX);
   }
   function resolveNormalizedProviderOrderForRuntime(state = {}) {
     const rawOrder = Array.isArray(state?.phoneSmsProviderOrder) ? state.phoneSmsProviderOrder : [];
@@ -539,6 +543,7 @@ const rowPhoneCodePollIntervalSeconds = { style: { display: 'none' } };
 const rowPhoneCodePollMaxRounds = { style: { display: 'none' } };
 const PHONE_SMS_PROVIDER_HERO_SMS = 'hero-sms';
 const PHONE_SMS_PROVIDER_FIVE_SIM = '5sim';
+const PHONE_SMS_PROVIDER_SMSPOOL = 'smspool';
 const PHONE_SMS_PROVIDER_NEXSMS = 'nexsms';
 function getSelectedPhoneSmsProvider() { return selectPhoneSmsProvider.value; }
 function isFiveSimProviderSelected() { return getSelectedPhoneSmsProvider() === PHONE_SMS_PROVIDER_FIVE_SIM; }
@@ -694,6 +699,60 @@ return {
   assert.equal(api.rowNexSmsCountry.style.display, '');
   assert.equal(api.rowNexSmsCountryFallback.style.display, '');
   assert.equal(api.rowNexSmsServiceCode.style.display, '');
+
+  api.setSelectedPhoneSmsProvider('smspool');
+  api.updatePhoneVerificationSettingsUI();
+  assert.equal(api.rowHeroSmsCountry.style.display, '');
+  assert.equal(api.rowHeroSmsCountryFallback.style.display, '');
+  assert.equal(api.rowHeroSmsAcquirePriority.style.display, '');
+  assert.equal(api.rowHeroSmsApiKey.style.display, '');
+  assert.equal(api.rowHeroSmsMaxPrice.style.display, '');
+});
+
+test('phone sms provider order options backfill SMSPool for old sidepanel DOM', () => {
+  const api = new Function('assert', `
+const PHONE_SMS_PROVIDER_HERO = 'hero-sms';
+const PHONE_SMS_PROVIDER_HERO_SMS = PHONE_SMS_PROVIDER_HERO;
+const PHONE_SMS_PROVIDER_FIVE_SIM = '5sim';
+const PHONE_SMS_PROVIDER_SMSPOOL = 'smspool';
+const PHONE_SMS_PROVIDER_NEXSMS = 'nexsms';
+const DEFAULT_PHONE_SMS_PROVIDER_ORDER = Object.freeze([
+  PHONE_SMS_PROVIDER_HERO,
+  PHONE_SMS_PROVIDER_FIVE_SIM,
+  PHONE_SMS_PROVIDER_SMSPOOL,
+  PHONE_SMS_PROVIDER_NEXSMS,
+]);
+const selectPhoneSmsProviderOrder = {
+  options: [
+    { value: 'hero-sms', textContent: 'HeroSMS', selected: true },
+    { value: '5sim', textContent: '5sim', selected: true },
+    { value: 'nexsms', textContent: 'NexSMS', selected: true },
+  ],
+  appendChild(option) {
+    this.options.push(option);
+  },
+};
+const document = {
+  createElement(tagName) {
+    assert.equal(tagName, 'option');
+    return { value: '', textContent: '', selected: false };
+  },
+};
+${extractFunction('normalizePhoneSmsProviderValue')}
+${extractFunction('normalizePhoneSmsProvider')}
+${extractFunction('getPhoneSmsProviderLabel')}
+${extractFunction('ensurePhoneSmsProviderOrderOptions')}
+return { selectPhoneSmsProviderOrder, ensurePhoneSmsProviderOrderOptions };
+`)(assert);
+
+  api.ensurePhoneSmsProviderOrderOptions();
+
+  assert.deepStrictEqual(
+    api.selectPhoneSmsProviderOrder.options.map((option) => option.value),
+    ['hero-sms', '5sim', 'nexsms', 'smspool']
+  );
+  assert.equal(api.selectPhoneSmsProviderOrder.options.at(-1).textContent, 'SMSPool');
+  assert.equal(api.selectPhoneSmsProviderOrder.options.at(-1).selected, true);
 });
 
 test('collectSettingsPayload keeps local helper sync enabled while persisting sms toggle state', () => {
@@ -799,6 +858,7 @@ const DEFAULT_HERO_SMS_COUNTRY_ID = 52;
 const DEFAULT_HERO_SMS_COUNTRY_LABEL = 'Thailand';
 const PHONE_SMS_PROVIDER_HERO_SMS = 'hero-sms';
 const PHONE_SMS_PROVIDER_FIVE_SIM = '5sim';
+const PHONE_SMS_PROVIDER_SMSPOOL = 'smspool';
 const PHONE_SMS_PROVIDER_NEXSMS = 'nexsms';
 const DEFAULT_PHONE_SMS_PROVIDER = PHONE_SMS_PROVIDER_HERO_SMS;
 const DEFAULT_FIVE_SIM_COUNTRY_ID = 'vietnam';
@@ -807,6 +867,8 @@ const DEFAULT_FIVE_SIM_OPERATOR = 'any';
 const DEFAULT_FIVE_SIM_PRODUCT = 'openai';
 const DEFAULT_NEX_SMS_COUNTRY_ORDER = [1];
 const DEFAULT_NEX_SMS_SERVICE_CODE = 'ot';
+const DEFAULT_SMS_POOL_COUNTRY_ID = 1;
+const DEFAULT_SMS_POOL_COUNTRY_LABEL = 'United States';
 const FIVE_SIM_SUPPORTED_COUNTRY_ID_SET = new Set(['indonesia', 'thailand', 'vietnam']);
 const HERO_SMS_SUPPORTED_COUNTRY_ID_SET = new Set(['6', '52', '10']);
 const selectHeroSmsCountry = {
@@ -858,6 +920,9 @@ ${extractFunction('normalizeHeroSmsReuseEnabledValue')}
 ${extractFunction('normalizeHeroSmsAcquirePriority')}
 ${extractFunction('normalizeHeroSmsCountryId')}
 ${extractFunction('normalizeHeroSmsCountryLabel')}
+${extractFunction('normalizeHeroSmsCountryFallbackList')}
+${extractFunction('normalizeSmsPoolCountryId')}
+${extractFunction('normalizeSmsPoolCountryLabel')}
 ${extractFunction('getSelectedHeroSmsCountryOption')}
 function syncHeroSmsFallbackSelectionOrderFromSelect() {
   return [{ id: 52, label: 'Thailand' }, { id: 16, label: 'United Kingdom' }];
@@ -891,6 +956,10 @@ return { collectSettingsPayload };
   assert.equal(payload.nexSmsApiKey, 'nex-key');
   assert.deepStrictEqual(payload.nexSmsCountryOrder, [1]);
   assert.equal(payload.nexSmsServiceCode, 'ot');
+  assert.equal(payload.smsPoolApiKey, '');
+  assert.equal(payload.smsPoolCountryId, 1);
+  assert.equal(payload.smsPoolCountryLabel, 'United States');
+  assert.deepStrictEqual(payload.smsPoolCountryFallback, []);
   assert.equal(payload.heroSmsReuseEnabled, true);
   assert.equal(payload.freePhoneReuseEnabled, true);
   assert.equal(payload.freePhoneReuseAutoEnabled, true);
@@ -1147,6 +1216,77 @@ return {
     api.fetchCalls.map((entry) => entry.url.pathname),
     ['/v1/guest/prices']
   );
+});
+
+test('previewHeroSmsPriceTiers reads SMSPool price endpoint', async () => {
+  const api = new Function(`
+let latestState = { phoneSmsProvider: 'smspool' };
+const PHONE_SMS_PROVIDER_HERO_SMS = 'hero-sms';
+const PHONE_SMS_PROVIDER_FIVE_SIM = '5sim';
+const PHONE_SMS_PROVIDER_SMSPOOL = 'smspool';
+const PHONE_SMS_PROVIDER_NEXSMS = 'nexsms';
+const DEFAULT_SMS_POOL_SERVICE_CODE = '671';
+const DEFAULT_SMS_POOL_COUNTRY_ID = 1;
+const DEFAULT_SMS_POOL_COUNTRY_LABEL = 'United States';
+const HERO_SMS_COUNTRY_SELECTION_MAX = 3;
+const inputHeroSmsMaxPrice = { value: '0.12' };
+const inputHeroSmsApiKey = { value: 'sms-pool-key' };
+const displayHeroSmsPriceTiers = { textContent: '' };
+const rowHeroSmsPriceTiers = { style: { display: 'none' } };
+const fetchCalls = [];
+
+${extractFunction('normalizePhoneSmsProvider')}
+${extractFunction('normalizePhoneSmsProviderValue')}
+${extractFunction('normalizePhoneSmsProviderOrderValue')}
+const phoneSmsProviderOrderSelection = [];
+function getSelectedPhoneSmsProvider() { return 'smspool'; }
+function getSelectedPhoneSmsProviderOrder() { return ['smspool']; }
+${extractFunction('normalizeHeroSmsMaxPriceValue')}
+${extractFunction('normalizeHeroSmsPriceForPreview')}
+${extractFunction('formatHeroSmsPriceForPreview')}
+${extractFunction('isHeroSmsPreviewEmptyPayload')}
+${extractFunction('describeHeroSmsPreviewPayload')}
+${extractFunction('summarizeHeroSmsPreviewError')}
+${extractFunction('formatPriceTiersForPreview')}
+${extractFunction('normalizeSmsPoolCountryId')}
+${extractFunction('normalizeSmsPoolCountryLabel')}
+function normalizeHeroSmsFetchErrorMessage(error) { return error?.message || String(error); }
+function getHeroSmsCountryLabelById() { return 'United States'; }
+function getPhoneSmsCountrySelectionForProvider() {
+  return [{ id: 1, label: 'United States' }];
+}
+async function fetch(url, options = {}) {
+  fetchCalls.push({ url, options });
+  return {
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({ price: '0.07', high_price: '0.09', success_rate: 58 }),
+  };
+}
+
+${extractFunction('buildSmsPoolPricePreviewLines')}
+${extractFunction('previewHeroSmsPriceTiers')}
+
+return {
+  displayHeroSmsPriceTiers,
+  rowHeroSmsPriceTiers,
+  fetchCalls,
+  previewHeroSmsPriceTiers,
+};
+`)();
+
+  await api.previewHeroSmsPriceTiers();
+
+  assert.equal(
+    api.displayHeroSmsPriceTiers.textContent,
+    'SMSPool:\nUnited States: 最低 0.07；成功率 58%；档位：0.07, 0.09'
+  );
+  assert.equal(api.rowHeroSmsPriceTiers.style.display, '');
+  assert.equal(api.fetchCalls[0].url, 'https://api.smspool.net/request/price');
+  assert.equal(api.fetchCalls[0].options.method, 'POST');
+  assert.match(String(api.fetchCalls[0].options.body), /country=1/);
+  assert.match(String(api.fetchCalls[0].options.body), /service=671/);
+  assert.match(String(api.fetchCalls[0].options.body), /key=sms-pool-key/);
 });
 
 test('hero sms max price input does not auto-save partial typing states', () => {

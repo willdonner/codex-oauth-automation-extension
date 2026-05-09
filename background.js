@@ -7,6 +7,7 @@ importScripts(
   'gopay-utils.js',
   'phone-sms/providers/hero-sms.js',
   'phone-sms/providers/five-sim.js',
+  'phone-sms/providers/smspool.js',
   'phone-sms/providers/registry.js',
   'background/phone-verification-flow.js',
   'background/account-run-history.js',
@@ -370,11 +371,13 @@ const PHONE_SMS_PROVIDER_HERO = 'hero-sms';
 const PHONE_SMS_PROVIDER_5SIM = '5sim';
 const PHONE_SMS_PROVIDER_HERO_SMS = PHONE_SMS_PROVIDER_HERO;
 const PHONE_SMS_PROVIDER_FIVE_SIM = PHONE_SMS_PROVIDER_5SIM;
+const PHONE_SMS_PROVIDER_SMSPOOL = 'smspool';
 const PHONE_SMS_PROVIDER_NEXSMS = 'nexsms';
 const DEFAULT_PHONE_SMS_PROVIDER = PHONE_SMS_PROVIDER_HERO;
 const DEFAULT_PHONE_SMS_PROVIDER_ORDER = Object.freeze([
   PHONE_SMS_PROVIDER_HERO,
   PHONE_SMS_PROVIDER_5SIM,
+  PHONE_SMS_PROVIDER_SMSPOOL,
   PHONE_SMS_PROVIDER_NEXSMS,
 ]);
 const DEFAULT_FIVE_SIM_BASE_URL = 'https://5sim.net/v1';
@@ -384,6 +387,10 @@ const DEFAULT_FIVE_SIM_COUNTRY_ORDER = Object.freeze(['thailand']);
 const DEFAULT_NEX_SMS_BASE_URL = 'https://api.nexsms.net';
 const DEFAULT_NEX_SMS_SERVICE_CODE = 'ot';
 const DEFAULT_NEX_SMS_COUNTRY_ORDER = Object.freeze([1]);
+const DEFAULT_SMS_POOL_BASE_URL = 'https://api.smspool.net/stubs/handler_api';
+const DEFAULT_SMS_POOL_SERVICE_CODE = '671';
+const DEFAULT_SMS_POOL_COUNTRY_ID = 1;
+const DEFAULT_SMS_POOL_COUNTRY_LABEL = 'United States';
 const DEFAULT_HERO_SMS_REUSE_ENABLED = true;
 const HERO_SMS_ACQUIRE_PRIORITY_COUNTRY = 'country';
 const HERO_SMS_ACQUIRE_PRIORITY_PRICE = 'price';
@@ -750,6 +757,11 @@ const PERSISTED_SETTING_DEFAULTS = {
   fiveSimCountryOrder: [...DEFAULT_FIVE_SIM_COUNTRY_ORDER],
   fiveSimMaxPrice: '',
   fiveSimOperator: FIVE_SIM_OPERATOR,
+  smsPoolApiKey: '',
+  smsPoolMaxPrice: '',
+  smsPoolCountryId: DEFAULT_SMS_POOL_COUNTRY_ID,
+  smsPoolCountryLabel: DEFAULT_SMS_POOL_COUNTRY_LABEL,
+  smsPoolCountryFallback: [],
   nexSmsApiKey: '',
   nexSmsCountryOrder: [...DEFAULT_NEX_SMS_COUNTRY_ORDER],
   nexSmsServiceCode: DEFAULT_NEX_SMS_SERVICE_CODE,
@@ -1170,15 +1182,23 @@ function normalizeHeroSmsCountryFallback(value = []) {
 
 function normalizePhoneSmsProvider(value = '') {
   const rootScope = typeof self !== 'undefined' ? self : globalThis;
-  if (rootScope.PhoneSmsProviderRegistry?.normalizeProviderId) {
-    return rootScope.PhoneSmsProviderRegistry.normalizeProviderId(value);
-  }
   const normalized = String(value || '').trim().toLowerCase();
   if (normalized === PHONE_SMS_PROVIDER_FIVE_SIM) {
     return PHONE_SMS_PROVIDER_FIVE_SIM;
   }
-  if (normalized === PHONE_SMS_PROVIDER_NEXSMS) {
-    return PHONE_SMS_PROVIDER_NEXSMS;
+  if (normalized === 'smspool' || normalized === 'sms-pool') {
+    return 'smspool';
+  }
+  if (normalized === 'nexsms' || normalized === 'nex-sms') {
+    return 'nexsms';
+  }
+  if (rootScope.PhoneSmsProviderRegistry?.normalizeProviderId) {
+    const registryProvider = rootScope.PhoneSmsProviderRegistry.normalizeProviderId(value);
+    if (registryProvider === PHONE_SMS_PROVIDER_FIVE_SIM
+      || registryProvider === PHONE_SMS_PROVIDER_SMSPOOL
+      || registryProvider === PHONE_SMS_PROVIDER_NEXSMS) {
+      return registryProvider;
+    }
   }
   return PHONE_SMS_PROVIDER_HERO_SMS;
 }
@@ -2574,6 +2594,24 @@ function normalizePersistentSettingValue(key, value) {
       return normalizeFiveSimMaxPrice(value);
     case 'fiveSimOperator':
       return normalizeFiveSimOperator(value);
+    case 'smsPoolApiKey':
+      return String(value || '');
+    case 'smsPoolMaxPrice':
+      return normalizeHeroSmsMaxPrice(value);
+    case 'smsPoolCountryId': {
+      const parsed = Math.floor(Number(value));
+      if (parsed === 187) {
+        return DEFAULT_SMS_POOL_COUNTRY_ID;
+      }
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return parsed;
+      }
+      return DEFAULT_SMS_POOL_COUNTRY_ID;
+    }
+    case 'smsPoolCountryLabel':
+      return String(value || DEFAULT_SMS_POOL_COUNTRY_LABEL).trim() || DEFAULT_SMS_POOL_COUNTRY_LABEL;
+    case 'smsPoolCountryFallback':
+      return normalizeHeroSmsCountryFallback(value);
     case 'nexSmsApiKey':
       return String(value || '');
     case 'nexSmsCountryOrder':
@@ -6815,7 +6853,7 @@ function phoneNumbersMatch(left = '', right = '') {
   return Boolean(leftDigits && rightDigits && leftDigits === rightDigits);
 }
 
-function normalizeLocalHeroSmsActivation(record) {
+function normalizeLocalPhoneSmsActivation(record) {
   if (!record || typeof record !== 'object' || Array.isArray(record)) {
     return null;
   }
@@ -6826,27 +6864,29 @@ function normalizeLocalHeroSmsActivation(record) {
   }
   const rawProvider = String(record.provider ?? record.smsProvider ?? '').trim();
   const provider = rawProvider ? normalizePhoneSmsProvider(rawProvider) : PHONE_SMS_PROVIDER_HERO;
-  if (provider !== PHONE_SMS_PROVIDER_HERO) {
-    return null;
-  }
-  const countryId = Math.max(
-    0,
-    Math.floor(Number(record.countryId ?? record.country ?? record.countryCode) || 0)
-  );
+  const countryId = provider === PHONE_SMS_PROVIDER_5SIM
+    ? String(record.countryId ?? record.country ?? record.countryCode ?? '').trim()
+    : Math.max(0, Math.floor(Number(record.countryId ?? record.country ?? record.countryCode) || 0));
   const countryLabel = String(record.countryLabel || record.label || '').trim();
-  const serviceCode = String(record.serviceCode || record.service || HERO_SMS_SERVICE_CODE).trim() || HERO_SMS_SERVICE_CODE;
+  const serviceFallback = provider === PHONE_SMS_PROVIDER_SMSPOOL
+    ? DEFAULT_SMS_POOL_SERVICE_CODE
+    : (provider === PHONE_SMS_PROVIDER_NEXSMS ? DEFAULT_NEX_SMS_SERVICE_CODE : HERO_SMS_SERVICE_CODE);
+  const serviceCode = String(record.serviceCode || record.service || serviceFallback).trim() || serviceFallback;
   return {
     ...record,
-    provider: PHONE_SMS_PROVIDER_HERO,
+    provider,
     activationId,
     phoneNumber,
     serviceCode,
-    ...(countryId > 0 ? { countryId } : {}),
+    ...(provider === PHONE_SMS_PROVIDER_5SIM
+      ? (countryId ? { countryId } : {})
+      : (countryId > 0 ? { countryId } : {})),
     ...(countryLabel ? { countryLabel } : {}),
   };
 }
 
-function findLocalHeroSmsActivationForPhone(state = {}, phoneNumber = '') {
+function findLocalPhoneSmsActivationForPhone(state = {}, phoneNumber = '', provider = '') {
+  const normalizedProvider = normalizePhoneSmsProvider(provider || state.phoneSmsProvider || PHONE_SMS_PROVIDER_HERO);
   const candidates = [
     state.currentPhoneActivation,
     state.reusablePhoneActivation,
@@ -6860,7 +6900,17 @@ function findLocalHeroSmsActivationForPhone(state = {}, phoneNumber = '') {
     candidates.push(...state.phoneReusableActivationPool);
   }
   for (const candidate of candidates) {
-    const normalized = normalizeLocalHeroSmsActivation(candidate);
+    const normalized = normalizeLocalPhoneSmsActivation(candidate);
+    if (
+      normalized
+      && phoneNumbersMatch(normalized.phoneNumber, phoneNumber)
+      && normalizePhoneSmsProvider(normalized.provider) === normalizedProvider
+    ) {
+      return normalized;
+    }
+  }
+  for (const candidate of candidates) {
+    const normalized = normalizeLocalPhoneSmsActivation(candidate);
     if (normalized && phoneNumbersMatch(normalized.phoneNumber, phoneNumber)) {
       return normalized;
     }
@@ -6874,7 +6924,8 @@ async function setFreeReusablePhoneActivation(record = {}) {
     throw new Error('请先填写白嫖复用手机号。');
   }
   const state = await getState();
-  const localActivation = findLocalHeroSmsActivationForPhone(state, phoneNumber);
+  const provider = normalizePhoneSmsProvider(record.provider || record.smsProvider || state.phoneSmsProvider || PHONE_SMS_PROVIDER_HERO);
+  const localActivation = findLocalPhoneSmsActivationForPhone(state, phoneNumber, provider);
   const activationId = String(
     record.activationId
     || record.id
@@ -6884,31 +6935,43 @@ async function setFreeReusablePhoneActivation(record = {}) {
   ).trim();
   const inferredCountry = inferHeroSmsCountryFromPhoneNumber(phoneNumber);
   const hasExplicitCountry = Number.isFinite(Number(record.countryId)) && Number(record.countryId) > 0;
+  const providerCountryId = provider === PHONE_SMS_PROVIDER_SMSPOOL
+    ? DEFAULT_SMS_POOL_COUNTRY_ID
+    : HERO_SMS_COUNTRY_ID;
+  const stateProviderCountryId = provider === PHONE_SMS_PROVIDER_SMSPOOL
+    ? Number(state.smsPoolCountryId)
+    : Number(state.heroSmsCountryId);
   const countryId = Math.max(
     1,
     Math.floor(
       Number(record.countryId)
       || Number(localActivation?.countryId)
-      || Number(inferredCountry?.id)
-      || Number(state.heroSmsCountryId)
-      || HERO_SMS_COUNTRY_ID
+      || (provider === PHONE_SMS_PROVIDER_HERO ? Number(inferredCountry?.id) : 0)
+      || stateProviderCountryId
+      || providerCountryId
     )
   );
-  const stateCountryLabel = Math.floor(Number(state.heroSmsCountryId) || 0) === countryId
-    ? String(state.heroSmsCountryLabel || '').trim()
+  const stateCountryLabel = Math.floor(stateProviderCountryId || 0) === countryId
+    ? String(provider === PHONE_SMS_PROVIDER_SMSPOOL ? state.smsPoolCountryLabel : state.heroSmsCountryLabel || '').trim()
     : '';
+  const defaultCountryLabel = provider === PHONE_SMS_PROVIDER_SMSPOOL
+    ? DEFAULT_SMS_POOL_COUNTRY_LABEL
+    : HERO_SMS_COUNTRY_LABEL;
   const countryLabel = String(
     record.countryLabel
     || (Number(localActivation?.countryId) === countryId ? localActivation?.countryLabel : '')
-    || (!hasExplicitCountry && inferredCountry?.id === countryId ? inferredCountry.label : '')
+    || (provider === PHONE_SMS_PROVIDER_HERO && !hasExplicitCountry && inferredCountry?.id === countryId ? inferredCountry.label : '')
     || stateCountryLabel
-    || (countryId === HERO_SMS_COUNTRY_ID ? HERO_SMS_COUNTRY_LABEL : `Country #${countryId}`)
+    || (countryId === providerCountryId ? defaultCountryLabel : `Country #${countryId}`)
   ).trim();
+  const serviceFallback = provider === PHONE_SMS_PROVIDER_SMSPOOL
+    ? DEFAULT_SMS_POOL_SERVICE_CODE
+    : (provider === PHONE_SMS_PROVIDER_NEXSMS ? DEFAULT_NEX_SMS_SERVICE_CODE : HERO_SMS_SERVICE_CODE);
   const activation = {
     ...(activationId ? { activationId } : {}),
     phoneNumber,
-    provider: PHONE_SMS_PROVIDER_HERO,
-    serviceCode: String(record.serviceCode || localActivation?.serviceCode || HERO_SMS_SERVICE_CODE).trim() || HERO_SMS_SERVICE_CODE,
+    provider,
+    serviceCode: String(record.serviceCode || localActivation?.serviceCode || serviceFallback).trim() || serviceFallback,
     countryId,
     ...(countryLabel ? { countryLabel } : {}),
     successfulUses: Math.max(0, Math.floor(Number(record.successfulUses) || 0)),
@@ -6919,10 +6982,13 @@ async function setFreeReusablePhoneActivation(record = {}) {
   };
   await setState({ freeReusablePhoneActivation: activation });
   broadcastDataUpdate({ freeReusablePhoneActivation: activation });
+  const providerLabel = provider === PHONE_SMS_PROVIDER_SMSPOOL
+    ? 'SMSPool'
+    : (provider === PHONE_SMS_PROVIDER_NEXSMS ? 'NexSMS' : (provider === PHONE_SMS_PROVIDER_5SIM ? '5sim' : 'HeroSMS'));
   await addLog(
     activationId
-      ? `已手动记录白嫖复用手机号 ${phoneNumber}（#${activationId}）。`
-      : `已手动记录白嫖复用手机号 ${phoneNumber}。未填写 HeroSMS 激活 ID，仅支持手动填号复用。`,
+      ? `已手动记录 ${providerLabel} 白嫖复用手机号 ${phoneNumber}（#${activationId}）。`
+      : `已手动记录 ${providerLabel} 白嫖复用手机号 ${phoneNumber}。未找到订单 ID，仅支持手动填号复用。`,
     'ok'
   );
   return { ok: true, freeReusablePhoneActivation: activation };
@@ -10791,6 +10857,10 @@ const phoneVerificationHelpers = self.MultiPageBackgroundPhoneVerification?.crea
   DEFAULT_NEX_SMS_BASE_URL,
   DEFAULT_NEX_SMS_COUNTRY_ORDER,
   DEFAULT_NEX_SMS_SERVICE_CODE,
+  DEFAULT_SMS_POOL_BASE_URL,
+  DEFAULT_SMS_POOL_SERVICE_CODE,
+  DEFAULT_SMS_POOL_COUNTRY_ID,
+  DEFAULT_SMS_POOL_COUNTRY_LABEL,
   DEFAULT_HERO_SMS_BASE_URL,
   DEFAULT_HERO_SMS_REUSE_ENABLED,
   DEFAULT_PHONE_CODE_WAIT_SECONDS,

@@ -83,6 +83,144 @@ test('phone verification helper requests HeroSMS numbers with fixed OpenAI and T
   assert.equal(requests[1].searchParams.get('api_key'), 'demo-key');
 });
 
+test('phone verification helper routes SMSPool through SMSPool compatible endpoint', async () => {
+  const requests = [];
+  const helpers = api.createPhoneVerificationHelpers({
+    addLog: async () => {},
+    ensureStep8SignupPageReady: async () => {},
+    fetchImpl: async (url) => {
+      const parsedUrl = new URL(url);
+      requests.push(parsedUrl);
+      const action = parsedUrl.searchParams.get('action');
+      if (action === 'getPrices') {
+        return {
+          ok: true,
+          text: async () => buildHeroSmsPricesPayload({ country: '1', service: '671', cost: 0.07, count: 8 }),
+        };
+      }
+      if (action === 'getNumber') {
+        return {
+          ok: true,
+          text: async () => 'ACCESS_NUMBER:sp-123:66959916439',
+        };
+      }
+      throw new Error(`Unexpected SMSPool action: ${action}`);
+    },
+    getState: async () => ({
+      phoneSmsProvider: 'smspool',
+      smsPoolApiKey: 'sms-pool-key',
+      smsPoolCountryId: 1,
+      smsPoolCountryLabel: 'United States',
+    }),
+    sendToContentScriptResilient: async () => ({}),
+    setState: async () => {},
+    sleepWithStop: async () => {},
+    throwIfStopped: () => {},
+  });
+
+  const activation = await helpers.requestPhoneActivation({
+    phoneSmsProvider: 'smspool',
+    smsPoolApiKey: 'sms-pool-key',
+    smsPoolCountryId: 1,
+    smsPoolCountryLabel: 'United States',
+  });
+
+  assert.deepStrictEqual(activation, {
+    activationId: 'sp-123',
+    phoneNumber: '66959916439',
+    provider: 'smspool',
+    serviceCode: '671',
+    countryId: 1,
+    successfulUses: 0,
+    maxUses: 3,
+  });
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].origin, 'https://api.smspool.net');
+  assert.equal(requests[0].pathname, '/stubs/handler_api');
+  assert.equal(requests[0].searchParams.get('action'), 'getPrices');
+  assert.equal(requests[0].searchParams.get('api_key'), 'sms-pool-key');
+  assert.equal(requests[0].searchParams.get('setting'), 'smspool');
+  assert.equal(requests[1].searchParams.get('action'), 'getNumber');
+  assert.equal(requests[1].searchParams.get('service'), '671');
+  assert.equal(requests[1].searchParams.get('country'), '1');
+  assert.equal(requests[1].searchParams.get('maxPrice'), '0.07');
+  assert.equal(requests[1].searchParams.get('setting'), 'smspool');
+});
+
+test('phone verification helper uses SMSPool resend endpoint for reuse and SMS polling', async () => {
+  const requests = [];
+  const helpers = api.createPhoneVerificationHelpers({
+    addLog: async () => {},
+    ensureStep8SignupPageReady: async () => {},
+    fetchImpl: async (url, options = {}) => {
+      const parsedUrl = new URL(url);
+      const body = new URLSearchParams(String(options.body || ''));
+      requests.push({ url: parsedUrl, options, body });
+      if (parsedUrl.pathname === '/sms/check_resend') {
+        return {
+          ok: true,
+          text: async () => JSON.stringify({ success: 1, message: 'Order can be resent' }),
+        };
+      }
+      if (parsedUrl.pathname === '/sms/resend') {
+        return {
+          ok: true,
+          text: async () => JSON.stringify({ success: 1, message: 'Number has been requested again', resend: 0 }),
+        };
+      }
+      if (parsedUrl.pathname === '/sms/check') {
+        return {
+          ok: true,
+          text: async () => JSON.stringify({ success: 1, sms: 'Your code is 123456' }),
+        };
+      }
+      throw new Error(`Unexpected SMSPool endpoint: ${parsedUrl.pathname}`);
+    },
+    getState: async () => ({
+      phoneSmsProvider: 'smspool',
+      smsPoolApiKey: 'sms-pool-key',
+      smsPoolCountryId: 1,
+      smsPoolCountryLabel: 'United States',
+    }),
+    sendToContentScriptResilient: async () => ({}),
+    setState: async () => {},
+    sleepWithStop: async () => {},
+    throwIfStopped: () => {},
+  });
+
+  const activation = {
+    activationId: 'sp-123',
+    phoneNumber: '12025550123',
+    provider: 'smspool',
+    serviceCode: '671',
+    countryId: 1,
+    countryLabel: 'United States',
+    successfulUses: 1,
+    maxUses: 3,
+  };
+  const reactivated = await helpers.reactivatePhoneActivation({
+    phoneSmsProvider: 'smspool',
+    smsPoolApiKey: 'sms-pool-key',
+  }, activation);
+  const code = await helpers.pollPhoneActivationCode({
+    phoneSmsProvider: 'smspool',
+    smsPoolApiKey: 'sms-pool-key',
+  }, reactivated, { maxRounds: 1, intervalMs: 1, timeoutMs: 1000 });
+
+  assert.equal(code, '123456');
+  assert.deepStrictEqual(
+    requests.map((request) => request.url.pathname),
+    ['/sms/check_resend', '/sms/resend', '/sms/check']
+  );
+  assert.equal(requests[0].options.method, 'POST');
+  assert.equal(requests[0].body.get('key'), 'sms-pool-key');
+  assert.equal(requests[0].body.get('orderid'), 'sp-123');
+  assert.equal(requests[1].body.get('key'), 'sms-pool-key');
+  assert.equal(requests[1].body.get('orderid'), 'sp-123');
+  assert.equal(requests[2].body.get('key'), 'sms-pool-key');
+  assert.equal(requests[2].body.get('orderid'), 'sp-123');
+});
+
 test('signup phone helper persists signup runtime state without touching add-phone activation', async () => {
   const setStateCalls = [];
   let currentState = {

@@ -25,6 +25,10 @@
       DEFAULT_NEX_SMS_BASE_URL = 'https://api.nexsms.net',
       DEFAULT_NEX_SMS_COUNTRY_ORDER = [1],
       DEFAULT_NEX_SMS_SERVICE_CODE = 'ot',
+      DEFAULT_SMS_POOL_BASE_URL = 'https://api.smspool.net/stubs/handler_api',
+      DEFAULT_SMS_POOL_SERVICE_CODE = '671',
+      DEFAULT_SMS_POOL_COUNTRY_ID = 1,
+      DEFAULT_SMS_POOL_COUNTRY_LABEL = 'United States',
       DEFAULT_HERO_SMS_REUSE_ENABLED = true,
       createFiveSimProvider = null,
       HERO_SMS_COUNTRY_ID = 52,
@@ -80,11 +84,13 @@
     const PHONE_SMS_PROVIDER_5SIM = '5sim';
     const PHONE_SMS_PROVIDER_HERO_SMS = PHONE_SMS_PROVIDER_HERO;
     const PHONE_SMS_PROVIDER_FIVE_SIM = PHONE_SMS_PROVIDER_5SIM;
+    const PHONE_SMS_PROVIDER_SMSPOOL = 'smspool';
     const PHONE_SMS_PROVIDER_NEXSMS = 'nexsms';
     const DEFAULT_PHONE_SMS_PROVIDER = PHONE_SMS_PROVIDER_HERO;
     const DEFAULT_PHONE_SMS_PROVIDER_ORDER = Object.freeze([
       PHONE_SMS_PROVIDER_HERO,
       PHONE_SMS_PROVIDER_5SIM,
+      PHONE_SMS_PROVIDER_SMSPOOL,
       PHONE_SMS_PROVIDER_NEXSMS,
     ]);
     const MAX_PHONE_REUSABLE_POOL = 12;
@@ -179,6 +185,9 @@
       const normalized = String(value || '').trim().toLowerCase();
       if (normalized === PHONE_SMS_PROVIDER_5SIM) {
         return PHONE_SMS_PROVIDER_5SIM;
+      }
+      if (normalized === PHONE_SMS_PROVIDER_SMSPOOL || normalized === 'sms-pool') {
+        return PHONE_SMS_PROVIDER_SMSPOOL;
       }
       if (normalized === PHONE_SMS_PROVIDER_NEXSMS) {
         return PHONE_SMS_PROVIDER_NEXSMS;
@@ -526,7 +535,7 @@
       });
 
       if (normalized.length) {
-        return normalized.slice(0, 3);
+        return normalized.slice(0, DEFAULT_PHONE_SMS_PROVIDER_ORDER.length);
       }
 
       const fallback = Array.isArray(fallbackOrder) ? fallbackOrder : [];
@@ -542,7 +551,7 @@
         fallbackNormalized.push(provider);
       });
 
-      return fallbackNormalized.slice(0, 3);
+      return fallbackNormalized.slice(0, DEFAULT_PHONE_SMS_PROVIDER_ORDER.length);
     }
 
     function resolvePhoneProviderOrder(state = {}, preferredProvider = '') {
@@ -570,7 +579,7 @@
         return fallbackOrder;
       }
       const withoutCurrent = fallbackOrder.filter((provider) => provider !== currentProvider);
-      return [currentProvider, ...withoutCurrent].slice(0, 3);
+      return [currentProvider, ...withoutCurrent].slice(0, DEFAULT_PHONE_SMS_PROVIDER_ORDER.length);
     }
 
     function reorderPriceCandidates(prices = [], acquirePriority = HERO_SMS_ACQUIRE_PRIORITY_COUNTRY, preferredPrice = null) {
@@ -643,13 +652,13 @@
         try {
           const query = {
             action,
-            service: HERO_SMS_SERVICE_CODE,
+            service: config.serviceCode || HERO_SMS_SERVICE_CODE,
             country: countryConfig.id,
           };
           if (action === 'getPricesExtended') {
             query.freePrice = 'true';
           }
-          const payload = await fetchHeroSmsPayload(config, query, `HeroSMS ${action}`);
+          const payload = await fetchHeroSmsPayload(config, query, `${getPhoneSmsProviderLabel(config.provider)} ${action}`);
           payloads.push(payload);
         } catch (error) {
           errors.push({
@@ -699,6 +708,41 @@
 
       Object.values(payload).forEach((value) => collectHeroSmsPriceCandidatesIncludingZeroStock(value, candidates));
       return candidates;
+    }
+
+    function normalizeSmsPoolCountryId(value, fallback = DEFAULT_SMS_POOL_COUNTRY_ID) {
+      const parsed = Math.floor(Number(value));
+      if (parsed === 187) {
+        return DEFAULT_SMS_POOL_COUNTRY_ID;
+      }
+      if (Number.isFinite(parsed) && parsed > 0) {
+        return parsed;
+      }
+      return normalizeCountryId(fallback, DEFAULT_SMS_POOL_COUNTRY_ID);
+    }
+
+    function resolveSmsPoolCountryCandidates(state = {}) {
+      const primary = {
+        id: normalizeSmsPoolCountryId(state.smsPoolCountryId),
+        label: normalizeCountryLabel(state.smsPoolCountryLabel, DEFAULT_SMS_POOL_COUNTRY_LABEL),
+      };
+      const fallbackList = normalizeCountryFallbackList(state.smsPoolCountryFallback);
+      const seen = new Set([primary.id]);
+      const candidates = [primary];
+
+      fallbackList.forEach((entry) => {
+        const nextId = normalizeSmsPoolCountryId(entry.id, 0);
+        if (!Number.isFinite(nextId) || nextId <= 0 || seen.has(nextId)) {
+          return;
+        }
+        seen.add(nextId);
+        candidates.push({
+          id: nextId,
+          label: normalizeCountryLabel(entry.label, `Country #${nextId}`),
+        });
+      });
+
+      return candidates.filter((entry) => Number.isFinite(entry.id) && entry.id > 0);
     }
 
     async function resolveHeroSmsPricePlanFromPricePayloads(config, countryConfig, state = {}, payloads = []) {
@@ -797,6 +841,9 @@
       }
       if (provider === PHONE_SMS_PROVIDER_NEXSMS) {
         return 'NexSMS';
+      }
+      if (provider === PHONE_SMS_PROVIDER_SMSPOOL) {
+        return 'SMSPool';
       }
       return 'HeroSMS';
     }
@@ -1014,14 +1061,18 @@
       const rawProvider = String(record.provider || '').trim();
       const provider = normalizePhoneSmsProvider(rawProvider);
       const rawCountryId = record.countryId ?? record.country;
-      const fallbackCountryId = provider === PHONE_SMS_PROVIDER_FIVE_SIM ? 'england' : HERO_SMS_COUNTRY_ID;
+      const fallbackCountryId = provider === PHONE_SMS_PROVIDER_FIVE_SIM
+        ? 'england'
+        : (provider === PHONE_SMS_PROVIDER_SMSPOOL ? DEFAULT_SMS_POOL_COUNTRY_ID : HERO_SMS_COUNTRY_ID);
       const expiresAt = normalizeTimestampMs(record.expiresAt);
       const serviceCode = String(
         record.serviceCode
         || (
           provider === PHONE_SMS_PROVIDER_FIVE_SIM
             ? DEFAULT_FIVE_SIM_PRODUCT
-            : (provider === PHONE_SMS_PROVIDER_NEXSMS ? DEFAULT_NEX_SMS_SERVICE_CODE : HERO_SMS_SERVICE_CODE)
+            : (provider === PHONE_SMS_PROVIDER_NEXSMS
+              ? DEFAULT_NEX_SMS_SERVICE_CODE
+              : (provider === PHONE_SMS_PROVIDER_SMSPOOL ? DEFAULT_SMS_POOL_SERVICE_CODE : HERO_SMS_SERVICE_CODE))
         )
       ).trim();
       const countryId = provider === PHONE_SMS_PROVIDER_FIVE_SIM
@@ -1029,7 +1080,9 @@
         : (
           provider === PHONE_SMS_PROVIDER_NEXSMS
             ? normalizeNexSmsCountryId(rawCountryId, 0)
-            : normalizeCountryId(rawCountryId, fallbackCountryId)
+            : (provider === PHONE_SMS_PROVIDER_SMSPOOL
+              ? normalizeSmsPoolCountryId(rawCountryId, fallbackCountryId)
+              : normalizeCountryId(rawCountryId, fallbackCountryId))
         );
       return {
         activationId,
@@ -1044,6 +1097,7 @@
         ...(expiresAt > 0 ? { expiresAt } : {}),
         ...(statusAction ? { statusAction } : {}),
         ...(record.source ? { source: String(record.source || '').trim() } : {}),
+        ...(record.manualOnly ? { manualOnly: true } : {}),
         ...(record.phoneCodeReceived ? { phoneCodeReceived: true } : {}),
         ...(record.phoneCodeReceivedAt ? { phoneCodeReceivedAt: Math.max(0, Number(record.phoneCodeReceivedAt) || 0) } : {}),
       };
@@ -1062,18 +1116,23 @@
       const activationId = String(
         record.activationId ?? record.id ?? record.activation ?? ''
       ).trim();
+      const provider = normalizePhoneSmsProvider(record.provider || record.smsProvider || PHONE_SMS_PROVIDER_HERO);
       const inferredCountry = inferHeroSmsCountryFromPhoneNumber(phoneNumber);
-      const countryId = normalizeCountryId(record.countryId, inferredCountry?.id || HERO_SMS_COUNTRY_ID);
+      const countryId = provider === PHONE_SMS_PROVIDER_SMSPOOL
+        ? normalizeSmsPoolCountryId(record.countryId, DEFAULT_SMS_POOL_COUNTRY_ID)
+        : normalizeCountryId(record.countryId, inferredCountry?.id || HERO_SMS_COUNTRY_ID);
       const countryLabel = String(
         record.countryLabel
-        || (inferredCountry && inferredCountry.id === countryId ? inferredCountry.label : '')
+        || (provider === PHONE_SMS_PROVIDER_SMSPOOL && countryId === DEFAULT_SMS_POOL_COUNTRY_ID ? DEFAULT_SMS_POOL_COUNTRY_LABEL : '')
+        || (provider === PHONE_SMS_PROVIDER_HERO && inferredCountry && inferredCountry.id === countryId ? inferredCountry.label : '')
       ).trim();
       const statusAction = String(record.statusAction || '').trim();
+      const serviceFallback = provider === PHONE_SMS_PROVIDER_SMSPOOL ? DEFAULT_SMS_POOL_SERVICE_CODE : HERO_SMS_SERVICE_CODE;
       return {
         ...(activationId ? { activationId } : {}),
         phoneNumber,
-        provider: PHONE_SMS_PROVIDER_HERO,
-        serviceCode: String(record.serviceCode || HERO_SMS_SERVICE_CODE).trim() || HERO_SMS_SERVICE_CODE,
+        provider,
+        serviceCode: String(record.serviceCode || serviceFallback).trim() || serviceFallback,
         countryId,
         ...(countryLabel ? { countryLabel } : {}),
         successfulUses: normalizeUseCount(record.successfulUses),
@@ -1093,7 +1152,6 @@
       const recordedAt = Math.max(0, Number(record?.recordedAt) || 0);
       return {
         ...normalized,
-        provider: PHONE_SMS_PROVIDER_HERO,
         source: 'free-manual-reuse',
         ...(recordedAt ? { recordedAt } : {}),
       };
@@ -1257,6 +1315,14 @@
         return raw.trim();
       }
       if (raw && typeof raw === 'object') {
+        const errors = Array.isArray(raw.errors)
+          ? raw.errors
+            .map((entry) => String(entry?.message || entry?.description || entry || '').trim())
+            .filter(Boolean)
+          : [];
+        if (errors.length) {
+          return errors.join('; ');
+        }
         if (raw.title || raw.details) {
           const title = String(raw.title || '').trim();
           const details = String(raw.details || '').trim();
@@ -1419,6 +1485,7 @@
     async function fetchHeroSmsPayload(config, query, actionLabel) {
       const requestUrl = buildHeroSmsUrl(config.baseUrl, {
         api_key: config.apiKey,
+        ...(config.provider === PHONE_SMS_PROVIDER_SMSPOOL ? { setting: 'smspool' } : {}),
         ...query,
       });
       const controller = typeof AbortController === 'function' ? new AbortController() : null;
@@ -1450,6 +1517,152 @@
           clearTimeout(timeoutId);
         }
       }
+    }
+
+    function buildSmsPoolNativeUrl(config, path) {
+      try {
+        const base = new URL(config?.baseUrl || DEFAULT_SMS_POOL_BASE_URL);
+        return new URL(path.replace(/^\/+/, ''), `${base.origin}/`).toString();
+      } catch {
+        return new URL(path.replace(/^\/+/, ''), 'https://api.smspool.net/').toString();
+      }
+    }
+
+    async function fetchSmsPoolNativePayload(config, path, actionLabel, fields = {}) {
+      const controller = typeof AbortController === 'function' ? new AbortController() : null;
+      const timeoutId = controller
+        ? setTimeout(() => controller.abort(), DEFAULT_PHONE_REQUEST_TIMEOUT_MS)
+        : null;
+
+      try {
+        const body = new URLSearchParams();
+        body.set('key', config.apiKey);
+        Object.entries(fields || {}).forEach(([key, value]) => {
+          if (value === undefined || value === null || value === '') {
+            return;
+          }
+          body.set(key, String(value));
+        });
+        const response = await fetchImpl(buildSmsPoolNativeUrl(config, path), {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+          },
+          body: body.toString(),
+          signal: controller?.signal,
+        });
+        const text = await response.text();
+        const payload = parseHeroSmsPayload(text);
+        if (!response.ok || (payload && typeof payload === 'object' && Number(payload.success) === 0)) {
+          const requestError = new Error(`${actionLabel} failed: ${describeHeroSmsPayload(payload) || response.status}`);
+          requestError.payload = payload;
+          requestError.status = response.status;
+          throw requestError;
+        }
+        return payload;
+      } catch (error) {
+        if (error?.name === 'AbortError') {
+          throw new Error(`${actionLabel} timed out.`);
+        }
+        throw error;
+      } finally {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
+      }
+    }
+
+    async function resendSmsPoolOrder(config, activation, actionLabel = 'SMSPool resend') {
+      const orderid = String(activation?.activationId || '').trim();
+      if (!orderid) {
+        throw new Error(`${actionLabel} failed: SMSPool orderid is missing.`);
+      }
+      await fetchSmsPoolNativePayload(
+        config,
+        '/sms/check_resend',
+        `${actionLabel} availability check`,
+        { orderid }
+      );
+      return fetchSmsPoolNativePayload(
+        config,
+        '/sms/resend',
+        actionLabel,
+        { orderid }
+      );
+    }
+
+    function collectSmsPoolOrderEntries(payload, entries = []) {
+      if (Array.isArray(payload)) {
+        payload.forEach((entry) => collectSmsPoolOrderEntries(entry, entries));
+        return entries;
+      }
+      if (!payload || typeof payload !== 'object') {
+        return entries;
+      }
+      const phoneNumber = String(
+        payload.phonenumber
+        || payload.phone_number
+        || payload.phoneNumber
+        || payload.number
+        || payload.phone
+        || ''
+      ).trim();
+      const orderId = String(
+        payload.orderid
+        || payload.order_id
+        || payload.orderId
+        || payload.id
+        || payload.ID
+        || payload.request_id
+        || ''
+      ).trim();
+      if (phoneNumber && orderId) {
+        entries.push({
+          orderId,
+          phoneNumber,
+          countryId: normalizeSmsPoolCountryId(payload.country ?? payload.country_id, DEFAULT_SMS_POOL_COUNTRY_ID),
+          countryLabel: String(payload.country_name || payload.countryName || payload.country_label || '').trim(),
+          serviceCode: String(payload.service ?? payload.service_id ?? DEFAULT_SMS_POOL_SERVICE_CODE).trim() || DEFAULT_SMS_POOL_SERVICE_CODE,
+        });
+      }
+      Object.values(payload).forEach((value) => {
+        if (value && typeof value === 'object') {
+          collectSmsPoolOrderEntries(value, entries);
+        }
+      });
+      return entries;
+    }
+
+    async function findSmsPoolOrderForPhone(config, phoneNumber = '') {
+      const targetDigits = String(phoneNumber || '').replace(/\D+/g, '');
+      if (!targetDigits) {
+        return null;
+      }
+      const queryAttempts = [
+        { path: '/request/active', fields: {} },
+        { path: '/request/history', fields: { start: 0, length: 25, search: targetDigits } },
+        { path: '/request/history', fields: { start: 0, length: 25, search: phoneNumber } },
+      ];
+      for (const attempt of queryAttempts) {
+        try {
+          const payload = await fetchSmsPoolNativePayload(
+            config,
+            attempt.path,
+            `SMSPool ${attempt.path}`,
+            attempt.fields
+          );
+          const matched = collectSmsPoolOrderEntries(payload, []).find((entry) => (
+            phoneNumbersMatch(entry.phoneNumber, phoneNumber)
+          ));
+          if (matched) {
+            return matched;
+          }
+        } catch (_) {
+          // Best effort lookup; fall through to the next SMSPool order source.
+        }
+      }
+      return null;
     }
 
     function parseFiveSimPayload(text) {
@@ -1658,6 +1871,21 @@
         };
       }
 
+      if (provider === PHONE_SMS_PROVIDER_SMSPOOL) {
+        const apiKey = normalizeApiKey(state.smsPoolApiKey || state.heroSmsApiKey);
+        if (!apiKey) {
+          throw new Error('SMSPool API key is missing. Save it in the side panel before running the phone flow.');
+        }
+        return {
+          provider,
+          apiKey,
+          baseUrl: normalizeUrl(state.smsPoolBaseUrl, DEFAULT_SMS_POOL_BASE_URL),
+          serviceCode: String(state.smsPoolServiceCode || DEFAULT_SMS_POOL_SERVICE_CODE).trim() || DEFAULT_SMS_POOL_SERVICE_CODE,
+          maxPriceLimit: normalizeHeroSmsPriceLimit(state.smsPoolMaxPrice || state.heroSmsMaxPrice),
+          countryCandidates: resolveSmsPoolCountryCandidates(state),
+        };
+      }
+
       const apiKey = normalizeApiKey(state.heroSmsApiKey);
       if (!apiKey) {
         throw new Error('HeroSMS API key is missing. Save it in the side panel before running the phone flow.');
@@ -1666,6 +1894,7 @@
         provider,
         apiKey,
         baseUrl: normalizeUrl(state.heroSmsBaseUrl, DEFAULT_HERO_SMS_BASE_URL),
+        serviceCode: HERO_SMS_SERVICE_CODE,
         countryCandidates: resolveCountryCandidates(state),
       };
     }
@@ -1889,7 +2118,7 @@
       if (!text) {
         return false;
       }
-      return /no\s+numbers\s+available\s+across|no\s+free\s+phones|numbers?\s+not\s+found|no\s+numbers\s+within\s+maxprice|step\s*9:\s*(?:5sim|nexsms)\s+countries\s+are\s+empty|\bNO_NUMBERS\b/i.test(text);
+      return /no\s+numbers\s+available\s+across|no\s+free\s+phones|numbers?\s+not\s+found|no\s+numbers\s+within\s+maxprice|step\s*9:\s*(?:5sim|nexsms|smspool)\s+countries\s+are\s+empty|\bNO_NUMBERS\b/i.test(text);
     }
 
     function resolveNoSupplyDiagnosticsContext(state = {}, providerOrder = []) {
@@ -1898,6 +2127,7 @@
         : resolvePhoneProviderOrder(state, state?.phoneSmsProvider || DEFAULT_PHONE_SMS_PROVIDER);
       const heroCountryCount = resolveCountryCandidates(state).length;
       const fiveSimCountryCount = resolveFiveSimCountryCandidates(state).length;
+      const smsPoolCountryCount = resolveSmsPoolCountryCandidates(state).length;
       const nexSmsCountryCount = resolveNexSmsCountryCandidates(state).length;
       const maxPrice = normalizeHeroSmsPriceLimit(state?.heroSmsMaxPrice);
       const acquirePriority = normalizeHeroSmsAcquirePriority(state?.heroSmsAcquirePriority);
@@ -1905,6 +2135,7 @@
         order,
         heroCountryCount,
         fiveSimCountryCount,
+        smsPoolCountryCount,
         nexSmsCountryCount,
         maxPrice,
         acquirePriority,
@@ -2071,7 +2302,7 @@
     async function fetchPhoneActivationPayload(config, countryConfig, action, options = {}) {
       const query = {
         action,
-        service: HERO_SMS_SERVICE_CODE,
+        service: config.serviceCode || HERO_SMS_SERVICE_CODE,
         country: countryConfig.id,
       };
       if (options.maxPrice !== null && options.maxPrice !== undefined) {
@@ -2080,7 +2311,7 @@
           query.fixedPrice = 'true';
         }
       }
-      return fetchHeroSmsPayload(config, query, `HeroSMS ${action}`);
+      return fetchHeroSmsPayload(config, query, `${getPhoneSmsProviderLabel(config.provider)} ${action}`);
     }
 
     async function requestPhoneActivationWithPrice(config, countryConfig, action, maxPrice, options = {}) {
@@ -3160,6 +3391,8 @@
           const countryIdKey = String(normalizeCountryId(countryConfig?.id, 0));
           const countryPriceFloor = countryPriceFloorByCountryId.get(countryIdKey) ?? null;
           const buildFallbackActivation = (requestAction) => ({
+            provider: config.provider,
+            serviceCode: config.serviceCode || HERO_SMS_SERVICE_CODE,
             countryId: countryConfig.id,
             ...(requestAction === 'getNumberV2' ? { statusAction: 'getStatusV2' } : {}),
           });
@@ -3356,7 +3589,12 @@
         }
       }
 
-      const config = resolvePhoneConfig(state);
+      const activationProvider = getActivationProviderId(normalizedActivation, state);
+      const config = resolvePhoneConfig(
+        activationProvider === PHONE_SMS_PROVIDER_SMSPOOL
+          ? { ...state, phoneSmsProvider: PHONE_SMS_PROVIDER_SMSPOOL }
+          : state
+      );
       if (config.provider === PHONE_SMS_PROVIDER_5SIM) {
         const reuseProduct = normalizeFiveSimCountryCode(
           normalizedActivation.serviceCode || config.product || DEFAULT_FIVE_SIM_PRODUCT,
@@ -3380,6 +3618,18 @@
       }
       if (config.provider === PHONE_SMS_PROVIDER_NEXSMS) {
         throw new Error('NexSMS does not support activation reuse for this flow.');
+      }
+      if (config.provider === PHONE_SMS_PROVIDER_SMSPOOL) {
+        const payload = await resendSmsPoolOrder(config, normalizedActivation, 'SMSPool resend');
+        const text = describeHeroSmsPayload(payload);
+        if (payload && typeof payload === 'object' && Number(payload.success) === 0) {
+          throw new Error(`SMSPool 复用手机号失败：${text || '空响应'}`);
+        }
+        return {
+          ...normalizedActivation,
+          provider: PHONE_SMS_PROVIDER_SMSPOOL,
+          serviceCode: normalizedActivation.serviceCode || config.serviceCode || DEFAULT_SMS_POOL_SERVICE_CODE,
+        };
       }
       const payload = await fetchHeroSmsPayload(config, {
         action: 'reactivate',
@@ -3410,7 +3660,12 @@
         );
         return `free reuse setStatus(${normalizedStatus}) skipped`;
       }
-      const config = resolvePhoneConfig(state);
+      const activationProvider = getActivationProviderId(normalizedActivation, state);
+      const config = resolvePhoneConfig(
+        activationProvider === PHONE_SMS_PROVIDER_SMSPOOL
+          ? { ...state, phoneSmsProvider: PHONE_SMS_PROVIDER_SMSPOOL }
+          : state
+      );
       if (config.provider === PHONE_SMS_PROVIDER_5SIM) {
         const endpoint = normalizedStatus === 6
           ? `/user/finish/${normalizedActivation.activationId}`
@@ -3437,6 +3692,31 @@
           throw new Error(`NexSMS close activation failed: ${describeNexSmsPayload(payload) || 'empty response'}`);
         }
         return describeNexSmsPayload(payload);
+      }
+      if (config.provider === PHONE_SMS_PROVIDER_SMSPOOL) {
+        if (normalizedStatus === 6) {
+          const payload = await fetchSmsPoolNativePayload(
+            config,
+            '/sms/activate',
+            actionLabel || 'SMSPool activate',
+            { orderid: normalizedActivation.activationId }
+          );
+          return describeHeroSmsPayload(payload);
+        }
+        if (normalizedStatus === 8) {
+          const payload = await fetchSmsPoolNativePayload(
+            config,
+            '/sms/cancel',
+            actionLabel || 'SMSPool cancel',
+            { orderid: normalizedActivation.activationId }
+          );
+          return describeHeroSmsPayload(payload);
+        }
+        if (normalizedStatus === 3) {
+          const payload = await resendSmsPoolOrder(config, normalizedActivation, actionLabel || 'SMSPool resend');
+          return describeHeroSmsPayload(payload);
+        }
+        return `SMSPool setStatus(${normalizedStatus}) skipped`;
       }
       const payload = await fetchHeroSmsPayload(config, {
         action: 'setStatus',
@@ -3561,7 +3841,7 @@
 
     async function requestAdditionalPhoneSms(state = {}, activation) {
       const config = resolvePhoneConfig(state);
-      if (config.provider !== PHONE_SMS_PROVIDER_HERO) {
+      if (config.provider !== PHONE_SMS_PROVIDER_HERO && config.provider !== PHONE_SMS_PROVIDER_SMSPOOL) {
         return;
       }
       try {
@@ -3600,12 +3880,15 @@
         return {
           ok: false,
           reason: 'missing_activation_id',
-          message: 'Saved free reusable phone has no HeroSMS activation ID; automatic free reuse cannot reactivate it.',
+          message: 'Saved free reusable phone has no activation ID; automatic free reuse cannot reactivate it.',
         };
       }
 
+      const activationProvider = getActivationProviderId(normalizedActivation, state);
       const statusAction = resolveActivationStatusAction(normalizedActivation);
-      const config = resolveHeroSmsPhoneConfig(state);
+      const config = activationProvider === PHONE_SMS_PROVIDER_SMSPOOL
+        ? resolvePhoneConfig({ ...state, phoneSmsProvider: PHONE_SMS_PROVIDER_SMSPOOL })
+        : resolveHeroSmsPhoneConfig(state);
       const start = Date.now();
       let lastStatus = '';
       let prepareRound = 0;
@@ -3619,16 +3902,21 @@
 
         try {
           await setPhoneActivationStatus(
-            { ...state, phoneSmsProvider: PHONE_SMS_PROVIDER_HERO },
+            {
+              ...state,
+              phoneSmsProvider: activationProvider === PHONE_SMS_PROVIDER_SMSPOOL
+                ? PHONE_SMS_PROVIDER_SMSPOOL
+                : PHONE_SMS_PROVIDER_HERO,
+            },
             normalizedActivation,
             3,
-            'HeroSMS setStatus(3) for automatic free reuse'
+            `${getPhoneSmsProviderLabel(config.provider)} setStatus(3) for automatic free reuse`
           );
         } catch (error) {
           return {
             ok: false,
             reason: 'set_status_failed',
-            message: error.message || 'HeroSMS setStatus(3) failed.',
+            message: error.message || `${getPhoneSmsProviderLabel(config.provider)} setStatus(3) failed.`,
             lastStatus,
             prepareRound,
           };
@@ -3641,10 +3929,17 @@
         await sleepWithStop(FREE_PHONE_REUSE_PREPARE_INTERVAL_MS);
 
         try {
-          const payload = await fetchHeroSmsPayload(config, {
-            action: statusAction,
-            id: normalizedActivation.activationId,
-          }, `HeroSMS ${statusAction} for automatic free reuse`);
+          const payload = config.provider === PHONE_SMS_PROVIDER_SMSPOOL
+            ? await fetchSmsPoolNativePayload(
+              config,
+              '/sms/check',
+              'SMSPool check SMS for automatic free reuse',
+              { orderid: normalizedActivation.activationId }
+            )
+            : await fetchHeroSmsPayload(config, {
+              action: statusAction,
+              id: normalizedActivation.activationId,
+            }, `HeroSMS ${statusAction} for automatic free reuse`);
           const statusText = describeHeroSmsPayload(payload);
           lastStatus = statusText;
           await addLog(
@@ -3658,7 +3953,16 @@
             && !Array.isArray(payload)
             && !payload.sms?.code
             && !payload.call?.code;
-          if (isHeroSmsReadyForFreshSmsText(statusText) || isHeroSmsWaitingStatusText(statusText) || v2Waiting) {
+          const smsPoolReady = config.provider === PHONE_SMS_PROVIDER_SMSPOOL
+            && payload
+            && typeof payload === 'object'
+            && !Array.isArray(payload)
+            && Number(payload.success) === 1
+            && !payload.code
+            && !payload.sms_code
+            && !payload.sms
+            && !payload.data?.code;
+          if (isHeroSmsReadyForFreshSmsText(statusText) || isHeroSmsWaitingStatusText(statusText) || v2Waiting || smsPoolReady) {
             return {
               ok: true,
               activation: {
@@ -3715,8 +4019,13 @@
         }
       }
       const statusAction = resolveActivationStatusAction(normalizedActivation);
+      const activationProvider = getActivationProviderId(normalizedActivation, state);
 
-      const config = resolvePhoneConfig(state);
+      const config = resolvePhoneConfig(
+        activationProvider === PHONE_SMS_PROVIDER_SMSPOOL
+          ? { ...state, phoneSmsProvider: PHONE_SMS_PROVIDER_SMSPOOL }
+          : state
+      );
       const configuredTimeoutMs = Math.max(1000, Number(options.timeoutMs) || 0);
       const timeoutMs = configuredTimeoutMs || (
         typeof getOAuthFlowStepTimeoutMs === 'function'
@@ -3843,6 +4152,66 @@
         throw buildPhoneCodeTimeoutError(lastResponse);
       }
 
+      if (config.provider === PHONE_SMS_PROVIDER_SMSPOOL) {
+        while (Date.now() - start < timeoutMs) {
+          if (maxRounds > 0 && pollCount >= maxRounds) {
+            break;
+          }
+          throwIfStopped();
+          const payload = await fetchSmsPoolNativePayload(
+            config,
+            '/sms/check',
+            'SMSPool check SMS',
+            { orderid: normalizedActivation.activationId }
+          );
+          const text = describeHeroSmsPayload(payload);
+          lastResponse = text;
+          pollCount += 1;
+
+          if (typeof options.onStatus === 'function') {
+            await options.onStatus({
+              activation: normalizedActivation,
+              elapsedMs: Date.now() - start,
+              pollCount,
+              statusText: text || 'PENDING',
+              timeoutMs,
+            });
+          }
+
+          const directCode = extractVerificationCode(
+            payload?.code
+            || payload?.sms_code
+            || payload?.sms
+            || payload?.text
+            || payload?.message
+            || payload?.data?.code
+            || payload?.data?.sms
+            || payload?.data?.text
+            || payload?.data?.message
+            || ''
+          );
+          if (directCode) {
+            return directCode;
+          }
+
+          const statusText = String(payload?.status || payload?.message || payload?.data?.status || text || '').trim();
+          if (
+            !statusText
+            || Number(payload?.success) === 1
+            || /pending|wait|waiting|received|active|open|no\s*sms|not\s*received|STATUS_WAIT/i.test(statusText)
+          ) {
+            await sleepWithStop(intervalMs);
+            continue;
+          }
+          if (/cancel|refund|expire|closed|banned|failed|invalid/i.test(statusText)) {
+            throw new Error(`SMSPool activation ended before receiving SMS: ${statusText}`);
+          }
+          await sleepWithStop(intervalMs);
+        }
+
+        throw buildPhoneCodeTimeoutError(lastResponse);
+      }
+
       while (Date.now() - start < timeoutMs) {
         if (maxRounds > 0 && pollCount >= maxRounds) {
           break;
@@ -3946,6 +4315,9 @@
       }
       if (normalizePhoneSmsProvider(providerId) === PHONE_SMS_PROVIDER_NEXSMS) {
         return resolveNexSmsCountryCandidates(state);
+      }
+      if (normalizePhoneSmsProvider(providerId) === PHONE_SMS_PROVIDER_SMSPOOL) {
+        return resolveSmsPoolCountryCandidates(state);
       }
       return resolveCountryCandidates(state);
     }
@@ -4311,7 +4683,7 @@
       if (!normalizeFreePhoneReuseEnabled(state?.freePhoneReuseEnabled)) {
         return null;
       }
-      const freeReusableActivation = normalizeFreeReusablePhoneActivation(
+      let freeReusableActivation = normalizeFreeReusablePhoneActivation(
         state[FREE_REUSABLE_PHONE_ACTIVATION_STATE_KEY]
       );
       if (!freeReusableActivation) {
@@ -4325,7 +4697,70 @@
         return null;
       }
 
-      const canPrepareAutomaticFreeReuse = normalizeFreePhoneReuseAutoEnabled(state)
+      const isSmsPoolFreeReuse = (
+        normalizePhoneSmsProvider(state?.phoneSmsProvider) === PHONE_SMS_PROVIDER_SMSPOOL
+        || normalizePhoneSmsProvider(freeReusableActivation.provider) === PHONE_SMS_PROVIDER_SMSPOOL
+      );
+
+      if (isSmsPoolFreeReuse && (!freeReusableActivation.activationId || freeReusableActivation.manualOnly)) {
+        const candidates = [
+          normalizeActivation(state.currentPhoneActivation),
+          normalizeActivation(state.reusablePhoneActivation),
+          normalizeActivation(state.pendingPhoneActivationConfirmation),
+          normalizeActivation(state.signupPhoneActivation),
+          normalizeActivation(state.signupPhoneCompletedActivation),
+          normalizeActivation(state.phonePreferredActivation),
+          ...normalizeActivationPool(state.phoneReusableActivationPool),
+        ].filter(Boolean);
+        const matchedSmsPoolActivation = candidates.find((entry) => (
+          getActivationProviderId(entry, state) === PHONE_SMS_PROVIDER_SMSPOOL
+          && phoneNumbersMatch(entry.phoneNumber, freeReusableActivation.phoneNumber)
+          && String(entry.activationId || '').trim()
+        ));
+        if (matchedSmsPoolActivation) {
+          freeReusableActivation = normalizeFreeReusablePhoneActivation({
+            ...freeReusableActivation,
+            ...matchedSmsPoolActivation,
+            provider: PHONE_SMS_PROVIDER_SMSPOOL,
+            serviceCode: matchedSmsPoolActivation.serviceCode || DEFAULT_SMS_POOL_SERVICE_CODE,
+            manualOnly: false,
+          });
+          await persistFreeReusableActivation(freeReusableActivation);
+          await addLog(
+            `步骤 9：已用本地 SMSPool 订单 #${freeReusableActivation.activationId} 自动修复白嫖复用记录。`,
+            'info'
+          );
+        }
+        if (!String(freeReusableActivation?.activationId || '').trim()) {
+          try {
+            const config = resolvePhoneConfig({ ...state, phoneSmsProvider: PHONE_SMS_PROVIDER_SMSPOOL });
+            const smsPoolOrder = await findSmsPoolOrderForPhone(config, freeReusableActivation.phoneNumber);
+            if (smsPoolOrder?.orderId) {
+              freeReusableActivation = normalizeFreeReusablePhoneActivation({
+                ...freeReusableActivation,
+                activationId: smsPoolOrder.orderId,
+                provider: PHONE_SMS_PROVIDER_SMSPOOL,
+                serviceCode: smsPoolOrder.serviceCode || DEFAULT_SMS_POOL_SERVICE_CODE,
+                countryId: smsPoolOrder.countryId || DEFAULT_SMS_POOL_COUNTRY_ID,
+                countryLabel: smsPoolOrder.countryLabel || freeReusableActivation.countryLabel || DEFAULT_SMS_POOL_COUNTRY_LABEL,
+                manualOnly: false,
+              });
+              await persistFreeReusableActivation(freeReusableActivation);
+              await addLog(
+                `步骤 9：已从 SMSPool 订单记录找到 ${freeReusableActivation.phoneNumber} 的订单 #${freeReusableActivation.activationId}，改为自动复用。`,
+                'info'
+              );
+            }
+          } catch (lookupError) {
+            await addLog(
+              `步骤 9：尝试从 SMSPool 订单记录查找白嫖复用订单失败。${lookupError.message || lookupError}`,
+              'warn'
+            );
+          }
+        }
+      }
+
+      const canPrepareAutomaticFreeReuse = (normalizeFreePhoneReuseAutoEnabled(state) || isSmsPoolFreeReuse)
         && !freeReusableActivation.manualOnly
         && Boolean(String(freeReusableActivation.activationId || '').trim());
 
@@ -4354,6 +4789,15 @@
         }
         await persistCurrentActivation(prepared.activation);
         return prepared.activation;
+      }
+
+      if (isSmsPoolFreeReuse) {
+        const message = `SMSPool 白嫖复用缺少订单 ID，无法自动 Resend。请清除白嫖号码后重新记录，或先完成一次 SMSPool 接码让扩展保存订单。`;
+        await addLog(`步骤 9：${message}`, 'error');
+        if (typeof requestStop === 'function') {
+          await requestStop({ logMessage: message });
+        }
+        throw new Error(`${PHONE_AUTO_FREE_REUSE_PREPARE_ERROR_PREFIX}${message}`);
       }
 
       const fillResult = await submitPhoneNumber(tabId, freeReusableActivation.phoneNumber, freeReusableActivation);

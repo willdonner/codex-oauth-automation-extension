@@ -4,17 +4,34 @@
 })(typeof self !== 'undefined' ? self : globalThis, function createPhoneSmsProviderRegistry(root) {
   const PROVIDER_HERO_SMS = 'hero-sms';
   const PROVIDER_FIVE_SIM = '5sim';
+  const PROVIDER_SMS_POOL = 'smspool';
+  const PROVIDER_NEXSMS = 'nexsms';
   const DEFAULT_PROVIDER = PROVIDER_HERO_SMS;
 
   function normalizeProviderId(value = '') {
     const normalized = String(value || '').trim().toLowerCase();
-    return normalized === PROVIDER_FIVE_SIM ? PROVIDER_FIVE_SIM : PROVIDER_HERO_SMS;
+    if (normalized === PROVIDER_FIVE_SIM) {
+      return PROVIDER_FIVE_SIM;
+    }
+    if (normalized === PROVIDER_SMS_POOL || normalized === 'sms-pool') {
+      return PROVIDER_SMS_POOL;
+    }
+    if (normalized === PROVIDER_NEXSMS || normalized === 'nex-sms') {
+      return PROVIDER_NEXSMS;
+    }
+    return PROVIDER_HERO_SMS;
   }
 
   function getProviderModule(providerId = DEFAULT_PROVIDER) {
     const normalized = normalizeProviderId(providerId);
     if (normalized === PROVIDER_FIVE_SIM) {
       return root.PhoneSmsFiveSimProvider || null;
+    }
+    if (normalized === PROVIDER_SMS_POOL) {
+      return root.PhoneSmsPoolProvider || null;
+    }
+    if (normalized === PROVIDER_NEXSMS) {
+      return root.PhoneSmsNexSmsProvider || null;
     }
     return root.PhoneSmsHeroSmsProvider || null;
   }
@@ -28,12 +45,24 @@
   }
 
   function getProviderLabel(providerId = DEFAULT_PROVIDER) {
-    return normalizeProviderId(providerId) === PROVIDER_FIVE_SIM ? '5sim' : 'HeroSMS';
+    const normalized = normalizeProviderId(providerId);
+    if (normalized === PROVIDER_FIVE_SIM) {
+      return '5sim';
+    }
+    if (normalized === PROVIDER_SMS_POOL) {
+      return 'SMSPool';
+    }
+    if (normalized === PROVIDER_NEXSMS) {
+      return 'NexSMS';
+    }
+    return 'HeroSMS';
   }
 
   return {
     PROVIDER_HERO_SMS,
     PROVIDER_FIVE_SIM,
+    PROVIDER_SMS_POOL,
+    PROVIDER_NEXSMS,
     DEFAULT_PROVIDER,
     normalizeProviderId,
     getProviderModule,
