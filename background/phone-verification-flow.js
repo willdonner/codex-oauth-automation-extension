@@ -3996,10 +3996,48 @@
             `${getPhoneSmsProviderLabel(config.provider)} setStatus(3) for automatic free reuse`
           );
         } catch (error) {
+          const errorMessage = String(error.message || '');
+          let isWaitTimeCooldown = false;
+          let shouldRetire = false;
+
+          if (config.provider === PHONE_SMS_PROVIDER_SMSPOOL) {
+            try {
+              const activePayload = await fetchSmsPoolNativePayload(config, '/request/active', 'SMSPool request active check');
+              const activeList = Array.isArray(activePayload) ? activePayload : [];
+              const isActive = activeList.some((entry) => String(entry.order_id || entry.id || entry.orderId || '') === String(normalizedActivation.activationId));
+              
+              if (isActive) {
+                isWaitTimeCooldown = true;
+                await addLog(`步骤 9：自动白嫖复用 ${getPhoneSmsProviderLabel(config.provider)} 提示 resend 报错（${errorMessage}），但订单仍在处理列表中，视为等待时间，跳过本次复用，将去购买新号。`, 'warn');
+              } else {
+                shouldRetire = true;
+                await addLog(`步骤 9：自动白嫖复用 ${getPhoneSmsProviderLabel(config.provider)} 提示 resend 报错且订单已不在活动列表中（${errorMessage}），准备释放该号码。`, 'warn');
+              }
+            } catch (listError) {
+              await addLog(`步骤 9：尝试获取 SMSPool 活动列表失败：${listError.message}`, 'warn');
+            }
+          }
+
+          if (isWaitTimeCooldown) {
+            return {
+              ok: false,
+              reason: 'wait_time_cooldown',
+              message: errorMessage,
+            };
+          }
+
+          if (shouldRetire) {
+            return {
+              ok: false,
+              reason: 'release_number',
+              message: errorMessage,
+            };
+          }
+
           return {
             ok: false,
             reason: 'set_status_failed',
-            message: error.message || `${getPhoneSmsProviderLabel(config.provider)} setStatus(3) failed.`,
+            message: errorMessage || `${getPhoneSmsProviderLabel(config.provider)} setStatus(3) failed.`,
             lastStatus,
             prepareRound,
           };
@@ -4881,16 +4919,23 @@
         const prepared = await prepareFreeReusablePhoneActivation(state, freeReusableActivation);
         if (!prepared.ok) {
           const reason = prepared.message || prepared.reason || 'unknown error';
-          const stopMessage = `自动白嫖复用准备失败：${freeReusableActivation.phoneNumber} 未确认进入等待短信状态，本次不购买新 HeroSMS 号码。原因：${reason}`;
+          
+          if (prepared.reason === 'wait_time_cooldown') {
+            return null; // Fallthrough to buy a new number
+          }
+          
+          if (prepared.reason === 'activation_cancelled' || prepared.reason === 'release_number') {
+            await retireFreeReusableActivation(
+              `自动白嫖复用号码 ${freeReusableActivation.phoneNumber} 已被释放（非等待时间报错或已被取消）。原因：${reason}`
+            );
+            return null; // Fallthrough to buy a new number
+          }
+
+          const stopMessage = `自动白嫖复用准备失败：${freeReusableActivation.phoneNumber} 未确认进入等待短信状态，本次不购买新号码。原因：${reason}`;
           await addLog(
-            `步骤 9：自动白嫖复用准备失败，停止本次接码且不购买新 HeroSMS 号码。${reason}`,
+            `步骤 9：自动白嫖复用准备失败，停止本次接码且不购买新号码。${reason}`,
             'error'
           );
-          if (prepared.reason === 'activation_cancelled') {
-            await retireFreeReusableActivation(
-              `自动白嫖复用号码 ${freeReusableActivation.phoneNumber} 已被 HeroSMS 取消。`
-            );
-          }
           if (typeof requestStop === 'function') {
             await requestStop({ logMessage: stopMessage });
           }
