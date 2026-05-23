@@ -409,6 +409,10 @@
       return /phone_max_usage_exceeded|phone_number_in_use|already\s+linked\s+to\s+the\s+maximum\s+number\s+of\s+accounts|phone\s+number\s+is\s+already\s+(?:in\s+use|linked|registered)|phone\s+number\s+has\s+already\s+been\s+used|already\s+associated\s+with\s+another\s+account|not\s+eligible\s+to\s+be\s+used|cannot\s+be\s+used\s+for\s+verification|号码.*(?:已|被).*(?:使用|占用|绑定|注册)|手机号.*(?:已|被).*(?:使用|占用|绑定|注册)|该手机号.*(?:已|被).*(?:使用|占用|绑定|注册)/i.test(text);
     }
 
+    function isPhoneVerificationRequestLimitError(value) {
+      return /you['’]?ve\s+made\s+too\s+many\s+phone\s+verification\s+requests|too\s+many\s+phone\s+verification\s+requests|phone\s+verification\s+requests.*try\s+again\s+later/i.test(String(value || '').trim());
+    }
+
     function isPhoneNumberInvalidError(value) {
       const text = String(value || '').trim();
       if (!text) {
@@ -749,10 +753,19 @@
       return normalizeCountryId(fallback, DEFAULT_SMS_POOL_COUNTRY_ID);
     }
 
+    function isLegacySmsPoolThailandDefault(value, label = '') {
+      return normalizeSmsPoolCountryId(value, 0) === HERO_SMS_COUNTRY_ID;
+    }
+
     function resolveSmsPoolCountryCandidates(state = {}) {
+      const primaryId = isLegacySmsPoolThailandDefault(state.smsPoolCountryId, state.smsPoolCountryLabel)
+        ? DEFAULT_SMS_POOL_COUNTRY_ID
+        : normalizeSmsPoolCountryId(state.smsPoolCountryId);
       const primary = {
-        id: normalizeSmsPoolCountryId(state.smsPoolCountryId),
-        label: normalizeCountryLabel(state.smsPoolCountryLabel, DEFAULT_SMS_POOL_COUNTRY_LABEL),
+        id: primaryId,
+        label: primaryId === DEFAULT_SMS_POOL_COUNTRY_ID
+          ? DEFAULT_SMS_POOL_COUNTRY_LABEL
+          : normalizeCountryLabel(state.smsPoolCountryLabel, `Country #${primaryId}`),
       };
       const fallbackList = normalizeCountryFallbackList(state.smsPoolCountryFallback);
       const seen = new Set([primary.id]);
@@ -760,7 +773,12 @@
 
       fallbackList.forEach((entry) => {
         const nextId = normalizeSmsPoolCountryId(entry.id, 0);
-        if (!Number.isFinite(nextId) || nextId <= 0 || seen.has(nextId)) {
+        if (
+          !Number.isFinite(nextId)
+          || nextId <= 0
+          || seen.has(nextId)
+          || isLegacySmsPoolThailandDefault(entry.id, entry.label)
+        ) {
           return;
         }
         seen.add(nextId);
@@ -1704,6 +1722,7 @@
         entries.push({
           orderId,
           phoneNumber,
+          status: String(payload.status_text || payload.statusText || payload.state || payload.status || '').trim(),
           countryId: normalizeSmsPoolCountryId(payload.country ?? payload.country_id, DEFAULT_SMS_POOL_COUNTRY_ID),
           countryLabel: String(payload.country_name || payload.countryName || payload.country_label || '').trim(),
           serviceCode: String(payload.service ?? payload.service_id ?? DEFAULT_SMS_POOL_SERVICE_CODE).trim() || DEFAULT_SMS_POOL_SERVICE_CODE,
@@ -1715,6 +1734,28 @@
         }
       });
       return entries;
+    }
+
+    function isSmsPoolTerminalOrderStatus(value = '') {
+      return /^(?:archive|archived|cancelled|canceled|refunded)$/i.test(String(value || '').trim());
+    }
+
+    function isSmsPoolAwaitingSmsOrderStatus(value = '') {
+      return /awaiting\s+sms|waiting\s+(?:for\s+)?sms|pending/i.test(String(value || '').trim());
+    }
+
+    function isSmsPoolTemporaryUnavailableMessage(value = '') {
+      return /not\s+available\s+at\s+the\s+moment|try\s+again\s+later|please\s+wait\s+(?:a\s+minute|\d+\s*(?:seconds?|minutes?))\s+before\s+resending|before\s+resending\s+your\s+order/i.test(String(value || '').trim());
+    }
+
+    function isSmsPoolReusableOrderStatus(value = '') {
+      const text = String(value || '').trim();
+      return /^(?:completed|finished|done|received|success|expired)$/i.test(text)
+        || isSmsPoolAwaitingSmsOrderStatus(text);
+    }
+
+    function isTransientPhoneAutomationError(value = '') {
+      return /content\s+script.*(?:did\s+not\s+respond|timeout|timed\s+out)|(?:did\s+not\s+respond|timeout|timed\s+out).*content\s+script|receiving\s+end\s+does\s+not\s+exist|extension\s+context\s+invalidated|tab\s+(?:was\s+)?(?:closed|discarded|not\s+found)/i.test(String(value || '').trim());
     }
 
     async function findSmsPoolOrderForPhone(config, phoneNumber = '') {
@@ -1737,6 +1778,40 @@
           );
           const matched = collectSmsPoolOrderEntries(payload, []).find((entry) => (
             phoneNumbersMatch(entry.phoneNumber, phoneNumber)
+          ));
+          if (matched) {
+            return matched;
+          }
+        } catch (_) {
+          // Best effort lookup; fall through to the next SMSPool order source.
+        }
+      }
+      return null;
+    }
+
+    async function findSmsPoolReusableOrder(config, options = {}) {
+      const excludedOrderIds = new Set(
+        (Array.isArray(options?.excludedOrderIds) ? options.excludedOrderIds : [])
+          .map((value) => String(value || '').trim())
+          .filter(Boolean)
+      );
+      const queryAttempts = [
+        { path: '/request/active', fields: {} },
+        { path: '/request/history', fields: { start: 0, length: 25 } },
+      ];
+      for (const attempt of queryAttempts) {
+        try {
+          const payload = await fetchSmsPoolNativePayload(
+            config,
+            attempt.path,
+            `SMSPool ${attempt.path} reusable lookup`,
+            attempt.fields
+          );
+          const matched = collectSmsPoolOrderEntries(payload, []).find((entry) => (
+            entry.orderId
+            && entry.phoneNumber
+            && !excludedOrderIds.has(String(entry.orderId || ''))
+            && isSmsPoolReusableOrderStatus(entry.status)
           ));
           if (matched) {
             return matched;
@@ -3998,17 +4073,28 @@
         } catch (error) {
           const errorMessage = String(error.message || '');
           let isWaitTimeCooldown = false;
+          let isAwaitingSms = false;
           let shouldRetire = false;
+          const isTemporaryUnavailable = isSmsPoolTemporaryUnavailableMessage(errorMessage);
 
           if (config.provider === PHONE_SMS_PROVIDER_SMSPOOL) {
             try {
               const activePayload = await fetchSmsPoolNativePayload(config, '/request/active', 'SMSPool request active check');
-              const activeList = Array.isArray(activePayload) ? activePayload : [];
-              const isActive = activeList.some((entry) => String(entry.order_id || entry.id || entry.orderId || '') === String(normalizedActivation.activationId));
+              const activeList = collectSmsPoolOrderEntries(activePayload, []);
+              const activeEntry = activeList.find((entry) => String(entry.orderId || '') === String(normalizedActivation.activationId));
               
-              if (isActive) {
+              if (activeEntry && isSmsPoolTerminalOrderStatus(activeEntry.status) && !isTemporaryUnavailable) {
+                shouldRetire = true;
+                await addLog(`步骤 9：自动白嫖复用 ${getPhoneSmsProviderLabel(config.provider)} 提示 resend 报错（${errorMessage}），订单状态为 ${activeEntry.status}，准备释放该号码。`, 'warn');
+              } else if (activeEntry && isSmsPoolAwaitingSmsOrderStatus(activeEntry.status)) {
+                isAwaitingSms = true;
+                await addLog(`步骤 9：自动白嫖复用 ${getPhoneSmsProviderLabel(config.provider)} 提示 resend 报错（${errorMessage}），但订单已处于 ${activeEntry.status}，将继续使用该号码等待验证码。`, 'warn');
+              } else if (activeEntry) {
                 isWaitTimeCooldown = true;
-                await addLog(`步骤 9：自动白嫖复用 ${getPhoneSmsProviderLabel(config.provider)} 提示 resend 报错（${errorMessage}），但订单仍在处理列表中，视为等待时间，跳过本次复用，将去购买新号。`, 'warn');
+                await addLog(`步骤 9：自动白嫖复用 ${getPhoneSmsProviderLabel(config.provider)} 提示 resend 报错（${errorMessage}），但订单仍在处理列表中且尚未进入 Awaiting SMS，跳过本次复用，将去购买新号。`, 'warn');
+              } else if (isTemporaryUnavailable) {
+                isWaitTimeCooldown = true;
+                await addLog(`步骤 9：自动白嫖复用 ${getPhoneSmsProviderLabel(config.provider)} 提示 resend 暂时不可用（${errorMessage}），即使订单不在活动列表中也保留该号码，跳过本轮复用。`, 'warn');
               } else {
                 shouldRetire = true;
                 await addLog(`步骤 9：自动白嫖复用 ${getPhoneSmsProviderLabel(config.provider)} 提示 resend 报错且订单已不在活动列表中（${errorMessage}），准备释放该号码。`, 'warn');
@@ -4023,6 +4109,16 @@
               ok: false,
               reason: 'wait_time_cooldown',
               message: errorMessage,
+            };
+          }
+
+          if (isAwaitingSms) {
+            return {
+              ok: true,
+              activation: {
+                ...normalizedActivation,
+                source: 'free-auto-reuse',
+              },
             };
           }
 
@@ -4826,13 +4922,54 @@
       await persistReusableActivation(null);
     }
 
-    async function handoffFreeReusablePhone(tabId, state = {}) {
+    async function handoffFreeReusablePhone(tabId, state = {}, options = {}) {
       if (!normalizeFreePhoneReuseEnabled(state?.freePhoneReuseEnabled)) {
         return null;
       }
+      throwIfStopped();
+      const skippedSmsPoolOrderIds = new Set(
+        (Array.isArray(options?.skippedSmsPoolOrderIds) ? options.skippedSmsPoolOrderIds : [])
+          .map((value) => String(value || '').trim())
+          .filter(Boolean)
+      );
+      const smsPoolFallbackDepth = Math.max(0, Math.floor(Number(options?.smsPoolFallbackDepth) || 0));
+      const maxSmsPoolFallbackDepth = 8;
+      const isSmsPoolProvider = normalizePhoneSmsProvider(state?.phoneSmsProvider) === PHONE_SMS_PROVIDER_SMSPOOL;
       let freeReusableActivation = normalizeFreeReusablePhoneActivation(
         state[FREE_REUSABLE_PHONE_ACTIVATION_STATE_KEY]
       );
+      if (!freeReusableActivation && isSmsPoolProvider) {
+        try {
+          const config = resolvePhoneConfig({ ...state, phoneSmsProvider: PHONE_SMS_PROVIDER_SMSPOOL });
+          const smsPoolOrder = await findSmsPoolReusableOrder(config, {
+            excludedOrderIds: Array.from(skippedSmsPoolOrderIds),
+          });
+          if (smsPoolOrder?.orderId) {
+            freeReusableActivation = normalizeFreeReusablePhoneActivation({
+              activationId: smsPoolOrder.orderId,
+              phoneNumber: smsPoolOrder.phoneNumber,
+              provider: PHONE_SMS_PROVIDER_SMSPOOL,
+              serviceCode: smsPoolOrder.serviceCode || DEFAULT_SMS_POOL_SERVICE_CODE,
+              countryId: smsPoolOrder.countryId || DEFAULT_SMS_POOL_COUNTRY_ID,
+              countryLabel: smsPoolOrder.countryLabel || DEFAULT_SMS_POOL_COUNTRY_LABEL,
+              successfulUses: 0,
+              maxUses: DEFAULT_PHONE_NUMBER_MAX_USES,
+              source: 'free-manual-reuse',
+              manualOnly: false,
+            });
+            await persistFreeReusableActivation(freeReusableActivation);
+            await addLog(
+              `步骤 9：已从 SMSPool 可重发订单中选择 ${freeReusableActivation.phoneNumber}（#${freeReusableActivation.activationId}）作为白嫖复用号码。`,
+              'info'
+            );
+          }
+        } catch (lookupError) {
+          await addLog(
+            `步骤 9：尝试从 SMSPool 可重发订单中选择白嫖复用号码失败。${lookupError.message || lookupError}`,
+            'warn'
+          );
+        }
+      }
       if (!freeReusableActivation) {
         return null;
       }
@@ -4921,6 +5058,57 @@
           const reason = prepared.message || prepared.reason || 'unknown error';
           
           if (prepared.reason === 'wait_time_cooldown') {
+            const currentOrderId = String(freeReusableActivation.activationId || '').trim();
+            if (currentOrderId) {
+              skippedSmsPoolOrderIds.add(currentOrderId);
+            }
+            if (isSmsPoolFreeReuse) {
+              if (smsPoolFallbackDepth >= maxSmsPoolFallbackDepth) {
+                await addLog(
+                  `步骤 9：SMSPool 可重发订单已连续跳过 ${smsPoolFallbackDepth} 次，停止继续切换候选，本轮将改为购买新号。`,
+                  'warn'
+                );
+                return null;
+              }
+              try {
+                throwIfStopped();
+                const config = resolvePhoneConfig({ ...state, phoneSmsProvider: PHONE_SMS_PROVIDER_SMSPOOL });
+                const fallbackOrder = await findSmsPoolReusableOrder(config, {
+                  excludedOrderIds: Array.from(skippedSmsPoolOrderIds),
+                });
+                if (fallbackOrder?.orderId) {
+                  freeReusableActivation = normalizeFreeReusablePhoneActivation({
+                    activationId: fallbackOrder.orderId,
+                    phoneNumber: fallbackOrder.phoneNumber,
+                    provider: PHONE_SMS_PROVIDER_SMSPOOL,
+                    serviceCode: fallbackOrder.serviceCode || DEFAULT_SMS_POOL_SERVICE_CODE,
+                    countryId: fallbackOrder.countryId || DEFAULT_SMS_POOL_COUNTRY_ID,
+                    countryLabel: fallbackOrder.countryLabel || DEFAULT_SMS_POOL_COUNTRY_LABEL,
+                    successfulUses: 0,
+                    maxUses: DEFAULT_PHONE_NUMBER_MAX_USES,
+                    source: 'free-manual-reuse',
+                    manualOnly: false,
+                  });
+                  await persistFreeReusableActivation(freeReusableActivation);
+                  await addLog(
+                    `步骤 9：已跳过仍在等待短信的 SMSPool 订单，改用可重发订单 ${freeReusableActivation.phoneNumber}（#${freeReusableActivation.activationId}）。`,
+                    'info'
+                  );
+                  return handoffFreeReusablePhone(tabId, {
+                    ...state,
+                    [FREE_REUSABLE_PHONE_ACTIVATION_STATE_KEY]: freeReusableActivation,
+                  }, {
+                    skippedSmsPoolOrderIds: Array.from(skippedSmsPoolOrderIds),
+                    smsPoolFallbackDepth: smsPoolFallbackDepth + 1,
+                  });
+                }
+              } catch (lookupError) {
+                await addLog(
+                  `步骤 9：等待期跳过后查找 SMSPool 可重发订单失败。${lookupError.message || lookupError}`,
+                  'warn'
+                );
+              }
+            }
             return null; // Fallthrough to buy a new number
           }
           
@@ -6268,6 +6456,7 @@
       let preferredActivationExhausted = false;
       let preferReuseExistingActivationOnAddPhone = false;
       let addPhoneReentryWithSameActivation = 0;
+      const skippedSmsPoolOrderIdsForStep9 = new Set();
       const countrySmsFailureCounts = new Map();
       const countryPriceFloorByKey = new Map();
       const normalizeCountryFailureKey = (countryId, provider = activation?.provider || state?.phoneSmsProvider || '') => {
@@ -6620,7 +6809,9 @@
               );
             }
             if (!activation) {
-              activation = await handoffFreeReusablePhone(tabId, state);
+              activation = await handoffFreeReusablePhone(tabId, state, {
+                skippedSmsPoolOrderIds: Array.from(skippedSmsPoolOrderIdsForStep9),
+              });
               if (activation) {
                 shouldCancelActivation = false;
               } else {
@@ -6687,7 +6878,7 @@
             }
             if (submitResult.addPhoneRejected) {
               const addPhoneRejectText = String(submitResult.errorText || submitResult.url || 'unknown error');
-              if (isPhoneNumberUsedError(addPhoneRejectText)) {
+              if (isPhoneNumberUsedError(addPhoneRejectText) || isPhoneVerificationRequestLimitError(addPhoneRejectText)) {
                 usedNumberReplacementAttempts += 1;
                 if (usedNumberReplacementAttempts > maxNumberReplacementAttempts) {
                   throw new Error(
@@ -6705,6 +6896,12 @@
                   await getState()
                 );
                 if (isFreeAutoReuseActivation(activation)) {
+                  const rejectedSmsPoolOrderId = getActivationProviderId(activation, state) === PHONE_SMS_PROVIDER_SMSPOOL
+                    ? String(activation.activationId || '').trim()
+                    : '';
+                  if (rejectedSmsPoolOrderId) {
+                    skippedSmsPoolOrderIdsForStep9.add(rejectedSmsPoolOrderId);
+                  }
                   await retireFreeReusableActivation(
                     `自动白嫖复用号码 ${activation.phoneNumber} 被目标站拒绝。`
                   );
@@ -6753,12 +6950,13 @@
                 );
                 if (
                   isPhoneNumberUsedError(retryRejectText)
+                  || isPhoneVerificationRequestLimitError(retryRejectText)
                   || isPhoneNumberDeliveryRefusedError(retryRejectText)
                   || isRecoverableAddPhoneSubmitError(retryRejectText)
                 ) {
                   await rotateActivationAfterAddPhoneFailure(
                     `add-phone keeps rejecting ${activation.phoneNumber} (${retryRejectText})`,
-                    isPhoneNumberUsedError(retryRejectText)
+                    (isPhoneNumberUsedError(retryRejectText) || isPhoneVerificationRequestLimitError(retryRejectText))
                       ? 'phone_number_used'
                       : (isPhoneNumberDeliveryRefusedError(retryRejectText) ? 'phone_delivery_refused' : 'add_phone_rejected'),
                     submitResult || {}
@@ -6975,8 +7173,17 @@
             await cancelPhoneActivation(state, activation);
           }
           if (isFreeAutoReuseActivation(activation)) {
+            const releasedSmsPoolOrderId = getActivationProviderId(activation, state) === PHONE_SMS_PROVIDER_SMSPOOL
+              ? String(activation.activationId || '').trim()
+              : '';
+            if (releasedSmsPoolOrderId) {
+              skippedSmsPoolOrderIdsForStep9.add(releasedSmsPoolOrderId);
+            }
+            const retireReason = /^sms_timeout_after_/i.test(String(replaceReason || ''))
+              ? `自动白嫖复用号码 ${activation.phoneNumber} ${formatStep9Reason(replaceReason)}，已释放并更换号码。`
+              : `自动白嫖复用号码 ${activation.phoneNumber} 在失败后被更换。`;
             await retireFreeReusableActivation(
-              `自动白嫖复用号码 ${activation.phoneNumber} 在失败后被更换。`
+              retireReason
             );
           }
           if (isPhoneNumberUsedError(replaceReason)) {
@@ -7044,9 +7251,17 @@
           throw error;
         }
         if (isFreeAutoReuseActivation(activation)) {
-          await retireFreeReusableActivation(
-            `自动白嫖复用号码 ${activation.phoneNumber} 执行失败：${errorMessage || 'unknown error'}。`
-          );
+          const isSmsPoolAutoReuse = getActivationProviderId(activation, await getState()) === PHONE_SMS_PROVIDER_SMSPOOL;
+          if (isSmsPoolAutoReuse && isTransientPhoneAutomationError(errorMessage)) {
+            await addLog(
+              `步骤 9：自动白嫖复用号码 ${activation.phoneNumber} 遇到临时页面通信失败，保留该号码记录。${errorMessage || 'unknown error'}`,
+              'warn'
+            );
+          } else {
+            await retireFreeReusableActivation(
+              `自动白嫖复用号码 ${activation.phoneNumber} 执行失败：${errorMessage || 'unknown error'}。`
+            );
+          }
         }
         if (shouldCancelActivation && activation) {
           await cancelPhoneActivation(await getState(), activation);

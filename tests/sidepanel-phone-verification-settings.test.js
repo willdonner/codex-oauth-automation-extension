@@ -1087,6 +1087,30 @@ return {
   assert.equal(api.savedPayload.fiveSimApiKey, 'five-live');
 });
 
+test('sidepanel resets legacy SMSPool Thailand country default to United States', () => {
+  const api = new Function(`
+const DEFAULT_HERO_SMS_COUNTRY_ID = 52;
+const DEFAULT_SMS_POOL_COUNTRY_ID = 1;
+const DEFAULT_SMS_POOL_COUNTRY_LABEL = 'United States';
+${extractFunction('normalizeSmsPoolCountryId')}
+${extractFunction('normalizeSmsPoolCountryLabel')}
+${extractFunction('isLegacySmsPoolThailandDefault')}
+${extractFunction('normalizeSmsPoolPrimaryCountry')}
+return { isLegacySmsPoolThailandDefault, normalizeSmsPoolPrimaryCountry };
+`)();
+
+  assert.equal(api.isLegacySmsPoolThailandDefault(52, 'Thailand'), true);
+  assert.equal(api.isLegacySmsPoolThailandDefault(52, 'United States'), true);
+  assert.deepStrictEqual(
+    api.normalizeSmsPoolPrimaryCountry(52, 'Thailand'),
+    { id: 1, label: 'United States' }
+  );
+  assert.deepStrictEqual(
+    api.normalizeSmsPoolPrimaryCountry(23, 'France'),
+    { id: 23, label: 'France' }
+  );
+});
+
 test('formatPhoneSmsPriceEntriesSummary treats HeroSMS physicalCount=0 as out of stock even when count is positive', () => {
   const api = new Function(`
 ${extractFunction('normalizeHeroSmsPriceForPreview')}
